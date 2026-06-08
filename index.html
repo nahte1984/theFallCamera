@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>碎裂的鏡像與重力</title>
+    <style>
+        /* 重置預設樣式並設置全螢幕黑色背景 */
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            overflow: hidden;
+            touch-action: none; /* 防止手機端預設的滑動行為 */
+            font-family: sans-serif;
+        }
+
+        /* 畫布設定，保持透明以顯示 body 的背景 SVG */
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background-color: transparent; 
+        }
+
+        /* UI 層：用來放置按鈕 */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+        }
+
+        /* 載入圖片按鈕 */
+        #start-btn {
+            cursor: pointer;
+            transition: transform 0.2s, opacity 0.5s;
+            pointer-events: auto;
+            /* 防止圖片在手機或滑鼠點擊時被選取或拖曳 */
+            user-select: none;
+            -webkit-user-drag: none;
+        }
+
+        #start-btn:active {
+            transform: scale(0.95);
+        }
+
+        /* 隱藏攝影機與截圖用的元素 */
+        video, #freeze-canvas {
+            display: none;
+        }
+    </style>
+    <!-- 引入 Tailwind CSS 確保 class 生效 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Matter.js 物理引擎 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+</head>
+<body>
+
+    <!-- UI 介面 -->
+    <div id="ui-layer">
+        <img id="start-btn" src="fall.png" class="max-w-[30%] max-h-[30%]">
+    </div>
+
+    <!-- 主要渲染畫布 -->
+    <canvas id="main-canvas"></canvas>
+
+    <!-- 隱藏的攝影機串流載體 -->
+    <video id="webcam" playsinline autoplay muted></video>
+    <!-- 隱藏的畫布，用來儲存畫面定格的那一瞬間 -->
+    <canvas id="freeze-canvas"></canvas>
+
+    <script>
+        // Matter.js 模組
+        const Engine = Matter.Engine,
+              Render = Matter.Render,
+              Runner = Matter.Runner,
+              Bodies = Matter.Bodies,
+              Composite = Matter.Composite,
+              Body = Matter.Body,
+              Constraint = Matter.Constraint;
+
+        // 初始化物理引擎
+        const engine = Engine.create();
+        const world = engine.world;
+        engine.gravity.y = 0; // 初始狀態無重力（讓方塊懸浮）
+
+        // 取得 HTML 元素
+        const canvas = document.getElementById('main-canvas');
+        const ctx = canvas.getContext('2d');
+        const video = document.getElementById('webcam');
+        const freezeCanvas = document.getElementById('freeze-canvas');
+        const freezeCtx = freezeCanvas.getContext('2d');
+        const startBtn = document.getElementById('start-btn');
+        const uiLayer = document.getElementById('ui-layer');
+
+        // 全域變數
+        let width = window.innerWidth;
+        let height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+
+        let boxes = [];
+        let cols, rows;
+        let boxSize = 50;
+        
+        let isLive = false;
+        let isFrozen = false;
+        let appState = 'init'; // 狀態機：init, live, shattered, clearing, growing
+
+        // 滑鼠拖曳約束
+        let mouseConstraint = null;
+        let dragBody = null;
+
+        // 建立邊界牆壁，防止方塊掉出螢幕
+        const wallOptions = { isStatic: true, render: { visible: false }, friction: 0.1, restitution: 0.5 };
+        let ground, leftWall, rightWall, ceiling;
+
+        function createWalls() {
+            const thickness = 100;
+            ground = Bodies.rectangle(width / 2, height + thickness / 2, width + 200, thickness, wallOptions);
+            leftWall = Bodies.rectangle(-thickness / 2, height / 2, thickness, height + 200, wallOptions);
+            rightWall = Bodies.rectangle(width + thickness / 2, height / 2, thickness, height + 200, wallOptions);
+            ceiling = Bodies.rectangle(width / 2, -thickness / 2, width + 200, thickness, wallOptions);
+            Composite.add(world, [ground, leftWall, rightWall, ceiling]);
+        }
+        createWalls();
+
+        // 建立方塊網格 (修改為同時生成，利用透明度 Fade-in)
+        function createGrid(callback) {
+            boxSize = 50;
+            
+            // 計算欄數與列數，填滿上半部 50%
+            cols = Math.ceil(width / boxSize);
+            rows = Math.ceil((height * 0.5) / boxSize);
+
+            // 讓整個網格置中貼齊頂部
+            const gridW = cols * boxSize;
+            const gridStartX = (width - gridW) / 2 + boxSize / 2;
+            const gridStartY = boxSize / 2;
+
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const x = gridStartX + c * boxSize;
+                    const y = gridStartY + r * boxSize;
+                    const box = Bodies.rectangle(x, y, boxSize, boxSize, {
+                        isStatic: true, 
+                        friction: 0.2,
+                        restitution: 0.6,
+                        frictionAir: 0.01
+                    });
+                    
+                    box.gridPos = { r: r, c: c };
+                    box.renderOpacity = 0; // 初始透明度為 0，用於 Fade-in
+                    boxes.push(box);
+                    Composite.add(world, box);
+                }
+            }
+            if (callback) callback();
+        }
+
+        // 自定義渲染函數
+        function renderLoop() {
+            // 更新物理引擎
+            Engine.update(engine, 1000 / 60);
+
+            // 清空畫布
+            ctx.clearRect(0, 0, width, height);
+
+            if (isLive || isFrozen) {
+                // 決定要畫即時影片還是定格畫面
+                let sourceImage = isFrozen ? freezeCanvas : video;
+                
+                if (sourceImage.videoWidth || sourceImage.width) {
+                    const imgW = sourceImage.videoWidth || sourceImage.width;
+                    const imgH = sourceImage.videoHeight || sourceImage.height;
+                    
+                    // 計算網格總尺寸
+                    const gridW = cols * boxSize;
+                    const gridH = rows * boxSize;
+
+                    // 使用 object-fit: cover 的邏輯計算影像的縮放與位移
+                    const scale = Math.max(gridW / imgW, gridH / imgH);
+                    const scaledImgW = imgW * scale;
+                    const scaledImgH = imgH * scale;
+                    
+                    const offsetX = (scaledImgW - gridW) / 2;
+                    const offsetY = (scaledImgH - gridH) / 2;
+
+                    // 畫出每個方塊
+                    for (let box of boxes) {
+                        ctx.save();
+                        
+                        // 處理 Fade-in 動畫 (Easing)
+                        if (box.renderOpacity !== undefined && box.renderOpacity < 1) {
+                            box.renderOpacity += (1 - box.renderOpacity) * 0.05; // 0.05 是平滑度
+                            if (box.renderOpacity > 0.99) box.renderOpacity = 1;
+                        }
+                        ctx.globalAlpha = box.renderOpacity !== undefined ? box.renderOpacity : 1;
+
+                        ctx.translate(box.position.x, box.position.y);
+                        ctx.rotate(box.angle);
+
+                        // 計算在原始影像中對應的區塊座標
+                        const sx = (box.gridPos.c * boxSize + offsetX) / scale;
+                        const sy = (box.gridPos.r * boxSize + offsetY) / scale;
+                        const sw = boxSize / scale;
+                        const sh = boxSize / scale;
+
+                        // 繪製影像映射
+                        // 技巧：加入 -0.5 與 +1 些微膨脹繪製區域，消除瀏覽器渲染相鄰方塊時的抗鋸齒縫隙，達成完美無縫
+                        ctx.drawImage(
+                            sourceImage,
+                            sx, sy, sw, sh,
+                            -boxSize / 2 - 0.5, -boxSize / 2 - 0.5, boxSize + 1, boxSize + 1
+                        );
+
+                        ctx.restore();
+                    }
+                }
+            }
+
+            requestAnimationFrame(renderLoop);
+        }
+
+        // 按鈕點擊：要求權限並初始化
+        startBtn.addEventListener('click', async () => {
+            try {
+                // 1. 處理 iOS 13+ 陀螺儀權限要求
+                if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    const permission = await DeviceOrientationEvent.requestPermission();
+                    if (permission !== 'granted') {
+                        console.warn("陀螺儀權限被拒絕");
+                    }
+                }
+
+                // 2. 請求後置鏡頭權限
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 640 } } 
+                });
+                video.srcObject = stream;
+                await video.play();
+
+                // 隱藏按鈕 UI
+                uiLayer.style.opacity = '0';
+                setTimeout(() => uiLayer.style.display = 'none', 500);
+
+                // 建立網格並開始渲染
+                createGrid(() => {
+                    appState = 'live';
+                });
+                isLive = true;
+                requestAnimationFrame(renderLoop);
+
+                // 綁定陀螺儀事件
+                window.addEventListener('deviceorientation', handleOrientation);
+
+            } catch (e) {
+                alert("無法取得相機或陀螺儀權限：\n" + e.message);
+            }
+        });
+
+        // 處理陀螺儀資料
+        function handleOrientation(event) {
+            if (appState !== 'shattered') return; // 只有在墜落後且未被吸走前，才受陀螺儀影響
+
+            let gamma = event.gamma; // 左右傾斜 (-90 到 90)
+            let beta = event.beta;   // 前後傾斜 (-180 到 180)
+
+            // 限制防呆
+            if (gamma > 90) gamma = 90;
+            if (gamma < -90) gamma = -90;
+
+            // 將角度映射為重力向量
+            const maxGravity = 1.5;
+            engine.gravity.x = (gamma / 45) * maxGravity;
+            engine.gravity.y = (beta / 45) * maxGravity;
+        }
+
+        // 點擊事件參數記錄 (用來分辨是純點擊還是滑鼠拖曳)
+        let ptrDownTime = 0;
+        let ptrDownPos = { x: 0, y: 0 };
+        let stateAtPointerDown = '';
+
+        // 使用者互動：點擊畫布 -> 畫面定格破碎 或 觸發引力吸走方塊
+        canvas.addEventListener('pointerdown', (e) => {
+            ptrDownTime = Date.now();
+            ptrDownPos = { x: e.clientX, y: e.clientY };
+            stateAtPointerDown = appState;
+
+            if (appState === 'live') {
+                // 1. 畫面定格並破碎
+                appState = 'shattered';
+
+                freezeCanvas.width = video.videoWidth;
+                freezeCanvas.height = video.videoHeight;
+                freezeCtx.drawImage(video, 0, 0);
+                isFrozen = true;
+
+                engine.gravity.y = 1;
+
+                for (let box of boxes) {
+                    Body.setStatic(box, false);
+                    
+                    const forceMagnitude = (0.01 + Math.random() * 0.02) * box.mass;
+                    Body.applyForce(box, box.position, {
+                        x: (Math.random() - 0.5) * forceMagnitude,
+                        y: (Math.random() - 0.5) * forceMagnitude * 2
+                    });
+                    Body.setAngularVelocity(box, (Math.random() - 0.5) * 0.3);
+                }
+            } else if (appState === 'shattered' && e.pointerType === 'mouse') {
+                // 如果是破碎狀態且為滑鼠操作，則觸發拖曳檢查
+                const mousePos = { x: e.clientX, y: e.clientY };
+                const bodiesUnder = Matter.Query.point(boxes, mousePos);
+                if (bodiesUnder.length > 0) {
+                    dragBody = bodiesUnder[0];
+                    mouseConstraint = Constraint.create({
+                        pointA: mousePos,
+                        bodyB: dragBody,
+                        pointB: { x: 0, y: 0 },
+                        stiffness: 0.1,
+                        damping: 0.1,
+                        render: { visible: false }
+                    });
+                    Composite.add(world, mouseConstraint);
+                }
+            }
+        });
+
+        // 觸發黑洞引力吸走舊方塊，然後再生的邏輯
+        function startClearing() {
+            appState = 'clearing';
+            
+            // 移除底部邊界牆壁，讓方塊可以無盡掉落
+            Composite.remove(world, ground);
+            
+            // 施加較平緩的向下引力
+            engine.gravity.x = 0;
+            engine.gravity.y = 1.5; 
+            
+            // 縮短等待時間（從 3000 改為 1200 毫秒），讓新方塊提早 fade in，減少畫面全黑的時間
+            setTimeout(() => {
+                // 清除物理世界中的舊方塊
+                Composite.remove(world, boxes);
+                boxes = [];
+                
+                // 加回底部牆壁
+                Composite.add(world, ground);
+                
+                // 重置重力場
+                engine.gravity.x = 0;
+                engine.gravity.y = 0;
+                
+                // 切換回即時攝影機狀態
+                isFrozen = false;
+                appState = 'growing';
+                
+                // 開始生長新的網格方塊
+                createGrid(() => {
+                    appState = 'live'; // 生長完畢後重新回到等待破碎的狀態
+                });
+            }, 1200);
+        }
+
+        canvas.addEventListener('pointermove', (e) => {
+            // 滑鼠移動時更新彈簧座標
+            if (mouseConstraint && e.pointerType === 'mouse') {
+                mouseConstraint.pointA = { x: e.clientX, y: e.clientY };
+            }
+        });
+
+        const releaseMouse = (e) => {
+            // 放開點擊時判斷：如果在碎裂狀態且滑鼠位移不大（單純 Click 而非 Drag），則觸發清除
+            if (appState === 'shattered' && stateAtPointerDown === 'shattered') {
+                const releasePos = { x: e.clientX, y: e.clientY };
+                const dist = Math.hypot(releasePos.x - ptrDownPos.x, releasePos.y - ptrDownPos.y);
+                const timeDiff = Date.now() - ptrDownTime;
+                
+                if (timeDiff < 400 && dist < 15) {
+                    startClearing();
+                }
+            }
+
+            // 放開滑鼠時解除拖曳約束
+            if (mouseConstraint && e.pointerType === 'mouse') {
+                Composite.remove(world, mouseConstraint);
+                mouseConstraint = null;
+                dragBody = null;
+            }
+        };
+
+        canvas.addEventListener('pointerup', releaseMouse);
+        canvas.addEventListener('pointercancel', releaseMouse);
+
+        // 防止多指觸控造成畫面縮放或滾動
+        document.addEventListener('touchstart', (e) => {
+            if (e.touches.length > 1) {
+                e.preventDefault();
+            }
+        }, { passive: false });
+
+    </script>
+</body>
+</html>
