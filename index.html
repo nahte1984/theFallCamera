@@ -3,15 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>theFallCamera | v1.0</title>
+    <title>theFallCamera | v1.1</title>
     <style>
-        /* 重置預設樣式並設置全螢幕黑色背景 */
+        /* 重置預設樣式並設置全螢幕黑色背景與點狀陣列 */
         body, html {
             margin: 0;
             padding: 0;
             width: 100%;
             height: 100%;
             background-color: #000;
+            /* 每 50px 生成一個 1px 的 #313131 小點 */
+            background-image: radial-gradient(circle, #313131 1px, transparent 1px);
+            background-size: 50px 50px;
+            background-position: 0 0;
             overflow: hidden;
             touch-action: none; /* 防止手機端預設的滑動行為 */
             font-family: sans-serif;
